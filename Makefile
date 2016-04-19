@@ -1,86 +1,146 @@
-#(C)2004-2005 AMX Mod X Development Team
+# (C)2004-2013 AMX Mod X Development Team
 # Makefile written by David "BAILOPAN" Anderson
-	
-HLSDK = /usr/include/hlsdk/multiplayer
-MM_ROOT = /usr/include/metamod/metamod
 
+###########################################
+### EDIT THESE PATHS FOR YOUR OWN SETUP ###
+###########################################
+
+HLSDK   = ../hlsdk
+MM_ROOT = ../metamod-am/metamod
+
+#####################################
 ### EDIT BELOW FOR OTHER PROJECTS ###
+#####################################
 
-OPT_FLAGS = -O2 -funroll-loops -s -pipe -fomit-frame-pointer -fno-strict-aliasing
-DEBUG_FLAGS = -g -ggdb3
-CPP = g++-4.2
-NAME = orpheu
+PROJECT = orpheu
 
-BIN_SUFFIX_32 = amxx_i386.so
-BIN_SUFFIX_64 = amxx_amd64.so
-
-OBJECTS = sdk/amxxmodule.cpp CDetourDis.cpp orpheu.cpp memory.cpp memoryStructureManager.cpp functionStructuresManager.cpp functionVirtualManager.cpp functionManager.cpp function.cpp filesManager.cpp hooker.cpp json/json_value.cpp json/json_reader.cpp global.cpp librariesManager.cpp typeHandlerManager.cpp configManager.cpp structHandler.cpp typeHandlerImplementations/boolHandler.cpp typeHandlerImplementations/byteHandler.cpp typeHandlerImplementations/longHandler.cpp typeHandlerImplementations/CBaseEntityHandler.cpp typeHandlerImplementations/charPtrHandler.cpp typeHandlerImplementations/edict_sPtrHandler.cpp typeHandlerImplementations/floatHandler.cpp typeHandlerImplementations/VectorHandler.cpp typeHandlerImplementations/CMBaseMonsterHandler.cpp typeHandlerImplementations/entvarHandler.cpp typeHandlerImplementations/short.cpp typeHandlerImplementations/charArrHandler.cpp typeHandlerImplementations/VectorPointerHandler.cpp typeHandlerImplementations/charHandler.cpp
+OBJECTS = public/sdk/amxxmodule.cpp orpheu.cpp memoryUtil.cpp memoryStructureManager.cpp functionStructuresManager.cpp functionVirtualManager.cpp functionManager.cpp function.cpp filesManager.cpp hooker.cpp jansson/dump.c jansson/error.c jansson/hashtable.c jansson/hashtable_seed.c jansson/load.c jansson/memory.c jansson/pack_unpack.c jansson/strbuffer.c jansson/strconv.c jansson/utf.c jansson/value.c global.cpp librariesManager.cpp typeHandlerManager.cpp configManager.cpp structHandler.cpp typeHandlerImplementations/boolHandler.cpp typeHandlerImplementations/byteHandler.cpp typeHandlerImplementations/longHandler.cpp typeHandlerImplementations/CBaseEntityHandler.cpp typeHandlerImplementations/charPtrHandler.cpp typeHandlerImplementations/edict_sPtrHandler.cpp typeHandlerImplementations/floatHandler.cpp typeHandlerImplementations/VectorHandler.cpp typeHandlerImplementations/CMBaseMonsterHandler.cpp typeHandlerImplementations/entvarHandler.cpp typeHandlerImplementations/short.cpp typeHandlerImplementations/charArrHandler.cpp typeHandlerImplementations/VectorPointerHandler.cpp typeHandlerImplementations/charHandler.cpp
 
 
-LINK = 
+##############################################
+### CONFIGURE ANY OTHER FLAGS/OPTIONS HERE ###
+##############################################
 
-INCLUDE = -I. -I$(HLSDK) -I$(HLSDK)/dlls -I$(HLSDK)/engine -I$(HLSDK)/game_shared -I$(HLSDK)/game_shared \
-	-I$(MM_ROOT) -I$(HLSDK)/common -I$(HLSDK)/pm_shared -Isdk -Iinclude
+C_OPT_FLAGS     = -DNDEBUG -O2 -funroll-loops -fomit-frame-pointer -pipe 
+C_DEBUG_FLAGS   = -D_DEBUG -DDEBUG -g -ggdb3
+C_GCC4_FLAGS    = -fvisibility=hidden
+CPP_GCC4_FLAGS  = -fvisibility-inlines-hidden
+CPP             = gcc-4.4
+CPP_OSX         = clang
 
-GCC_VERSION := $(shell $(CPP) -dumpversion >&1 | cut -b1)
+LINK =
 
-ifeq "$(GCC_VERSION)" "4"
-        OPT_FLAGS += -fvisibility=hidden -fvisibility-inlines-hidden
+INCLUDE =   -I. -Isdk -Iincludes -Ijansson \
+			-Ipublic -Ipublic/sdk -Ipublic/amtl \
+			-I$(HLSDK) -I$(HLSDK)/public -I$(HLSDK)/common -I$(HLSDK)/dlls -I$(HLSDK)/engine -I$(HLSDK)/game_shared -I$(HLSDK)/pm_shared \
+			-I$(MM_ROOT)
+
+################################################
+### DO NOT EDIT BELOW HERE FOR MOST PROJECTS ###
+################################################
+
+OS := "$(shell uname -s)"
+
+ifeq "$(OS)" "Darwin"
+	CPP = $(CPP_OSX)
+	LIB_EXT = dylib
+	LIB_SUFFIX = _amxx
+	CFLAGS += -DOSX -D_OSX -DPOSIX
+	LINK += -dynamiclib -lstdc++ -mmacosx-version-min=10.5 -arch=i386
+else
+	LIB_EXT = so
+	LIB_SUFFIX = _amxx_i386
+	CFLAGS += -DLINUX -D_LINUX -DPOSIX
+	LINK += -shared
 endif
+
+LINK += -m32 -lm -ldl
+
+CFLAGS += -DORPHEU_BUILD -DORPHEU_USE_VERSIONLIB -DPAWN_CELL_SIZE=32 -DJIT -DASM32 -DHAVE_STDINT_H -fno-strict-aliasing -m32 -Wall  -Werror -Wno-uninitialized -Wno-unused -Wno-switch
+CPPFLAGS += -Wno-invalid-offsetof -fno-exceptions -fno-rtti
+
+BINARY = $(PROJECT)$(LIB_SUFFIX).$(LIB_EXT)
 
 ifeq "$(DEBUG)" "true"
 	BIN_DIR = Debug
-	CFLAGS = $(DEBUG_FLAGS)
+	CFLAGS += $(C_DEBUG_FLAGS)
 else
 	BIN_DIR = Release
-	CFLAGS = $(OPT_FLAGS)
+	CFLAGS += $(C_OPT_FLAGS)
+	LINK += -s
 endif
 
-CFLAGS += -DNDEBUG -Wno-non-virtual-dtor -DHAVE_STDINT_H -static-libgcc -m32
+IS_CLANG := $(shell $(CPP) --version | head -1 | grep clang > /dev/null && echo "1" || echo "0")
 
-ifeq "$(AMD64)" "true"
-	BINARY = $(NAME)_$(BIN_SUFFIX_64)
-	CFLAGS += -DPAWN_CELL_SIZE=64 -DHAVE_I64 -m64 
+ifeq "$(IS_CLANG)" "1"
+	CPP_MAJOR := $(shell $(CPP) --version | grep clang | sed "s/.*version \([0-9]\)*\.[0-9]*.*/\1/")
+	CPP_MINOR := $(shell $(CPP) --version | grep clang | sed "s/.*version [0-9]*\.\([0-9]\)*.*/\1/")
 else
-	BINARY = $(NAME)_$(BIN_SUFFIX_32)
-	CFLAGS += -DPAWN_CELL_SIZE=32 -DJIT -DASM32
-	OPT_FLAGS += -march=i586
+	CPP_MAJOR := $(shell $(CPP) -dumpversion >&1 | cut -b1)
+	CPP_MINOR := $(shell $(CPP) -dumpversion >&1 | cut -b3)
 endif
 
-OBJ_LINUX := $(OBJECTS:%.cpp=$(BIN_DIR)/%.o)
+# Clang || GCC >= 4
+ifeq "$(shell expr $(IS_CLANG) \| $(CPP_MAJOR) \>= 4)" "1"
+	CFLAGS += $(C_GCC4_FLAGS)
+	CPPFLAGS += $(CPP_GCC4_FLAGS)
+endif
+
+ifeq "$(IS_CLANG)" "1"
+	CFLAGS += -Wno-logical-op-parentheses
+else
+	CFLAGS += -Wno-parentheses
+endif
+
+# Clang >= 3 || GCC >= 4.7
+ifeq "$(shell expr $(IS_CLANG) \& $(CPP_MAJOR) \>= 3 \| $(CPP_MAJOR) \>= 4 \& $(CPP_MINOR) \>= 7)" "1"
+	CFLAGS += -Wno-delete-non-virtual-dtor
+endif
+
+# OS is Linux and not using clang
+ifeq "$(shell expr $(OS) \= Linux \& $(IS_CLANG) \= 0)" "1"
+	LINK += -static-libgcc
+endif
+
+# OS is Linux and using clang
+ifeq "$(shell expr $(OS) \= Linux \& $(IS_CLANG) \= 1)" "1"
+	LINK += -lgcc_eh
+endif
+
+OBJ_BIN := $(OBJECTS:%.cpp=$(BIN_DIR)/%.o)
+OBJ_BIN := $(OBJ_BIN:%.c=$(BIN_DIR)/%.o)
+
+# This will break if we include other Makefiles, but is fine for now. It allows
+#  us to make a copy of this file that uses altered paths (ie. Makefile.mine)
+#  or other changes without mucking up the original.
+MAKEFILE_NAME := $(CURDIR)/$(word $(words $(MAKEFILE_LIST)),$(MAKEFILE_LIST))
 
 $(BIN_DIR)/%.o: %.cpp
-	$(CPP) $(INCLUDE) $(CFLAGS) -o $@ -c $<
+	$(CPP) $(INCLUDE) $(CFLAGS) $(CPPFLAGS) -o $@ -c $<
 
+$(BIN_DIR)/%.o: %.c
+	$(CPP) $(INCLUDE) $(CFLAGS) -o $@ -c $<
+    
 all:
 	mkdir -p $(BIN_DIR)
-	mkdir -p $(BIN_DIR)/sdk
+	mkdir -p $(BIN_DIR)/public/sdk
 	mkdir -p $(BIN_DIR)/typeHandlerImplementations
-	mkdir -p $(BIN_DIR)/json
+	mkdir -p $(BIN_DIR)/jansson
+	$(MAKE) -f $(MAKEFILE_NAME) $(PROJECT)
 
-	$(MAKE) orpheu
+$(PROJECT): $(OBJ_BIN)
+	$(CPP) $(INCLUDE) $(OBJ_BIN) $(LINK) -o $(BIN_DIR)/$(BINARY)
 
-amd64:
-	$(MAKE) all AMD64=true
-
-orpheu: $(OBJ_LINUX)
-	$(CPP) $(INCLUDE) $(CFLAGS) $(OBJ_LINUX) $(LINK) -shared -ldl -lm -o$(BIN_DIR)/$(BINARY) libboost_system-gcc42.a libboost_filesystem-gcc42.a
-
-debug:	
-	$(MAKE) all DEBUG=true
+debug:
+	$(MAKE) -f $(MAKEFILE_NAME) all DEBUG=true
 
 default: all
 
 clean:
-	rm -rf Release/sdk/*.o
-	rm -rf Release/*.o
-	rm -rf Release/typeHandlerImplementations/*.o
-	rm -rf Release/json
-	rm -rf Release/$(NAME)_$(BIN_SUFFIX_32)
-	rm -rf Release/$(NAME)_$(BIN_SUFFIX_64)
-	rm -rf Debug/sdk/*.o
-	rm -rf Debug/*.o
-	rm -rf Debug/typeHandlerImplementations/*.o
-	rm -rf Debug/json
-	rm -rf Debug/$(NAME)_$(BIN_SUFFIX_32)
-	rm -rf Debug/$(NAME)_$(BIN_SUFFIX_64)
+	rm -rf $(BIN_DIR)/*.o
+	rm -rf $(BIN_DIR)/public/sdk/*.o
+	rm -rf $(BIN_DIR)/typeHandlerImplementations/*.o
+	rm -rf $(BIN_DIR)/jansson/*.o
+	rm -f $(BIN_DIR)/$(BINARY)
+
+ 

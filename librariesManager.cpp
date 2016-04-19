@@ -1,7 +1,7 @@
 
 #include <librariesManager.h>
 
-#include <sm_trie_tpl.h>
+#include <sm_stringhashmap.h>
 
 #if defined __linux__
 #include <dlfcn.h>
@@ -11,6 +11,29 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include <sys/mman.h>
+#include <link.h>
+#include <limits.h>
+#include <errno.h>
+
+#ifndef uint32
+#define uint32	unsigned int
+#endif
+
+#ifndef FALSE
+#define FALSE	0
+#endif
+
+#ifndef TRUE
+#define TRUE	1
+#endif
+
+#ifndef PAGESIZE
+#define PAGESIZE sysconf(_SC_PAGESIZE)
+#endif
+
+typedef int BOOL;
 #else
 #include <windows.h>
 #include <psapi.h>
@@ -18,89 +41,86 @@
 
 namespace LibrariesManager
 {
-	KTrie<LibraryInfo*>* LibraryNameToLibraryInfo = new KTrie<LibraryInfo*>;	
+	StringHashMap<LibraryInfo*>* LibraryNameToLibraryInfo = new StringHashMap < LibraryInfo* > ;
 
-	bool hasLibrary(char *libraryName)
+	bool hasLibrary(const char *libraryName)
 	{
-		return LibraryNameToLibraryInfo->retrieve(libraryName) != NULL;
+		return LibraryNameToLibraryInfo->retrieve(libraryName);
 	}
 
 #if defined __linux__
 
-	// Code derived from code from David Anderson
-	long getLength(void *baseAddress)
+	char* BaseAddress;
+	char* EndAddress;
+	char* LibraryName;
+
+	inline uint32 IAlign(uint32 address)
 	{
-			pid_t pid = getpid();
-			char file[255];
-			char buffer[2048];
-			snprintf(file, sizeof(file)-1, "/proc/%d/maps", pid);
-			FILE *fp = fopen(file, "rt");
-			if (fp)
+		return (address & ~(PAGESIZE - 1));
+	}
+
+	inline uint32 IAlign2(uint32 address)
+	{
+		return (IAlign(address) + PAGESIZE);
+	}
+
+	static int dl_callback(struct dl_phdr_info *info, size_t size, void *data)
+	{
+		char* libraryName = (char*)data;
+
+		if ((!libraryName) || strstr(info->dlpi_name, libraryName) > 0)
+		{
+			int i;
+			BOOL ismain = FALSE;
+
+			if (info->dlpi_addr == 0x00)
+				ismain = TRUE;
+			else
+				BaseAddress = (char *)info->dlpi_addr;
+
+			for (i = 0; i < info->dlpi_phnum; ++i)
 			{
-				long length = 0;
-
-        		void *start=NULL;
-				void *end=NULL;
-
-        		while (!feof(fp))
+				if (info->dlpi_phdr[i].p_memsz && IAlign(info->dlpi_phdr[i].p_vaddr))
 				{
-					fgets(buffer, sizeof(buffer)-1, fp);			
-#if defined AMD64
-					sscanf(buffer, "%Lx-%Lx", &start, &end);
-#else
-					sscanf(buffer, "%lx-%lx", &start, &end);
-#endif
-					if(start == baseAddress)
-					{
-						length = (unsigned long)end  - (unsigned long)start;
+					if (ismain && (uint32)BaseAddress > IAlign(info->dlpi_phdr[i].p_vaddr))
+						BaseAddress = (char*)IAlign(info->dlpi_phdr[i].p_vaddr);
 
-						char ignore[100];
-						int value;
+					if ((uint32)EndAddress < (info->dlpi_phdr[i].p_vaddr + info->dlpi_phdr[i].p_memsz))
+						EndAddress = (char*)IAlign2((info->dlpi_phdr[i].p_vaddr + info->dlpi_phdr[i].p_memsz));
+				}
+			}
 
-						while(!feof(fp))
-						{
-							fgets(buffer, sizeof(buffer)-1, fp);
-#if defined AMD64
-							sscanf(buffer, "%Lx-%Lx %s %s %s %d", &start, &end, ignore, ignore, ignore, &value);
-#else
-	        				sscanf(buffer, "%lx-%lx %s %s %s %d", &start, &end, ignore, ignore ,ignore, &value);
-#endif
-							if(!value)
-							{		
-								break;
-							}
-							else
-							{
-								length += (unsigned long)end  - (unsigned long)start;
-							}
-						}
-						
-						break;
-					}
-        		}
+			EndAddress += info->dlpi_addr;
 
-				fclose(fp);
-
-			return length;
+			return (int)BaseAddress;
 		}
 
 		return 0;
 	}
-	bool addLibrary(char* libraryName,void* addressContained)
+
+	bool addLibrary(const char* libraryName, void* addressContained)
 	{
 		Dl_info info;
 
-		if(dladdr(addressContained,&info))
+		if (addressContained && dladdr(addressContained, &info))
 		{
-			LibraryInfo* libraryInfo = new LibraryInfo;
+			LibraryName = (char*)info.dli_fname;
 
-			libraryInfo->baseAddress = (void*) info.dli_fbase;
-			libraryInfo->length = getLength((void*) info.dli_fbase);
-			libraryInfo->handle = dlopen(info.dli_fname, RTLD_NOW);
+			BaseAddress = (char *)0xffffffff;
+			EndAddress = 0;
 
-			LibraryNameToLibraryInfo->insert(libraryName,libraryInfo);
-			
-			return true;
+			if (dl_iterate_phdr(dl_callback, LibraryName))
+			{
+				LibraryInfo* libraryInfo = new LibraryInfo;
+
+				libraryInfo->baseAddress = (void*)BaseAddress;
+				libraryInfo->length = (long)EndAddress - (long)BaseAddress;
+				libraryInfo->handle = dlopen(LibraryName, RTLD_NOW);
+
+				LibraryNameToLibraryInfo->insert(libraryName, libraryInfo);
+
+				return true;
+			}
 		}
 
 		return false;
@@ -108,26 +128,26 @@ namespace LibrariesManager
 
 #else
 
-	bool addLibrary(char* libraryName,void* addressContained)
+	bool addLibrary(const char* libraryName, void* addressContained)
 	{
 		HMODULE module;
 
-		if(GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)addressContained,&module))
+		if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCSTR)addressContained, &module))
 		{
 			HANDLE process =  GetCurrentProcess();
 			_MODULEINFO moduleInfo;
 
-			if(GetModuleInformation(process,module,&moduleInfo,sizeof moduleInfo))
+			if (GetModuleInformation(process, module, &moduleInfo, sizeof moduleInfo))
 			{
 				CloseHandle(process);
 
 				LibraryInfo* libraryInfo = new LibraryInfo;
 
-				libraryInfo->baseAddress = (void*) moduleInfo.lpBaseOfDll;
+				libraryInfo->baseAddress = (void*)moduleInfo.lpBaseOfDll;
 				libraryInfo->length = moduleInfo.SizeOfImage;
 				libraryInfo->handle = module;
 
-				LibraryNameToLibraryInfo->insert(libraryName,libraryInfo);
+				LibraryNameToLibraryInfo->insert(libraryName, libraryInfo);
 
 				return true;
 			}
@@ -137,85 +157,81 @@ namespace LibrariesManager
 	}
 #endif
 
-	void* findFunction(char* libraryName,char* functionName)
+	void* findFunction(const char* libraryName, const char* functionName)
 	{
-		LibraryInfo** libraryInfoPointer = LibraryNameToLibraryInfo->retrieve(libraryName);
+		LibraryInfo* libraryInfo;
 
-		if(libraryInfoPointer)
+		if (LibraryNameToLibraryInfo->retrieve(libraryName, &libraryInfo))
 		{
-			LibraryInfo* libraryInfo = *libraryInfoPointer;
-
 #if defined __linux__
 
-			return dlsym(libraryInfo->handle,functionName);
+			return dlsym(libraryInfo->handle, functionName);
 #else
 
-			return GetProcAddress((HMODULE)libraryInfo->handle,functionName);
+			return GetProcAddress((HMODULE)libraryInfo->handle, functionName);
 #endif
 		}
 		return NULL;
 	}
-	bool compareSignature(unsigned char* address,unsigned char* signature,SignatureEntryType* signatureData,unsigned int length)	
+	bool compareSignature(unsigned char* address, unsigned char* signature, SignatureEntryType* signatureData, unsigned int length)
 	{
-		if(length == 1)
+		if (length == 1)
 		{
-			switch(*signatureData)
+			switch (*signatureData)
 			{
-				case AnyByteOrNothing:
-				case AnyByte:
-				{
-					return true;
-				}
-				case SpecificByte:
-				{
-					return *address == *signature;
-				}
+			case AnyByteOrNothing:
+			case AnyByte:
+			{
+				return true;
+			}
+			case SpecificByte:
+			{
+				return *address == *signature;
+			}
 			}
 		}
 		else
 		{
-			switch(*signatureData)
+			switch (*signatureData)
 			{
-				case SpecificByte:
+			case SpecificByte:
+			{
+				if (*address != *signature)
 				{
-					if(*address != *signature)
-					{
-						return false;
-					}
-					else
-					{
-						return compareSignature(address+1,signature+1,signatureData+1,length-1);	
-					}
+					return false;
 				}
-				case AnyByteOrNothing:
+				else
 				{
-					if(compareSignature(address,signature+1,signatureData+1,length-1))
-					{
-						return true;
-					}
+					return compareSignature(address + 1, signature + 1, signatureData + 1, length - 1);
 				}
-				case AnyByte:
+			}
+			case AnyByteOrNothing:
+			{
+				if (compareSignature(address, signature + 1, signatureData + 1, length - 1))
 				{
-					return compareSignature(address+1,signature+1,signatureData+1,length-1);
+					return true;
 				}
+			}
+			case AnyByte:
+			{
+				return compareSignature(address + 1, signature + 1, signatureData + 1, length - 1);
+			}
 			}
 		}
 
 		return true;
 	}
-	void* findFunction(char* libraryName,unsigned char* signature,SignatureEntryType* signatureData,unsigned int length)
+	void* findFunction(const char* libraryName, unsigned char* signature, SignatureEntryType* signatureData, unsigned int length)
 	{
-		LibraryInfo** libraryInfoPointer = LibraryNameToLibraryInfo->retrieve(libraryName);
+		LibraryInfo* libraryInfo;
 
-		if(libraryInfoPointer)
+		if (LibraryNameToLibraryInfo->retrieve(libraryName, &libraryInfo))
 		{
-			LibraryInfo* libraryInfo = *libraryInfoPointer;
-
-			for(unsigned int i=0;i<= libraryInfo->length - length;i++)
+			for (size_t i = 0; i <= libraryInfo->length - length; ++i)
 			{
-				if(compareSignature((unsigned char *)libraryInfo->baseAddress + i,signature,signatureData,length))
+				if (compareSignature((unsigned char *)libraryInfo->baseAddress + i, signature, signatureData, length))
 				{
-					return (void*) (((unsigned char*)libraryInfo->baseAddress) + i);
+					return (void*)(((unsigned char*)libraryInfo->baseAddress) + i);
 				}
 			}
 		}
@@ -223,59 +239,52 @@ namespace LibrariesManager
 		return NULL;
 	}
 
-	void* findMemory(char* libraryName,unsigned char* signature,SignatureEntryType* signatureData,unsigned int length,long start)
+	void* findMemory(const char* libraryName, unsigned char* signature, SignatureEntryType* signatureData, unsigned int length, long start)
 	{
-		LibraryInfo** libraryInfoPointer = LibraryNameToLibraryInfo->retrieve(libraryName);
+		LibraryInfo* libraryInfo;
 
-		if(libraryInfoPointer)
+		if (LibraryNameToLibraryInfo->retrieve(libraryName, &libraryInfo))
 		{
-			LibraryInfo* libraryInfo = *libraryInfoPointer;
-
-			for(unsigned int i= start - (unsigned int) libraryInfo->baseAddress ;i<= libraryInfo->length - length;i++)
+			for (unsigned int i = start - (unsigned int)libraryInfo->baseAddress; i <= libraryInfo->length - length; ++i)
 			{
-				if(compareSignature((unsigned char *)libraryInfo->baseAddress + i,signature,signatureData,length))
+				if (compareSignature((unsigned char *)libraryInfo->baseAddress + i, signature, signatureData, length))
 				{
-					return (void*) (((unsigned char*)libraryInfo->baseAddress) + i);
+					return (void*)(((unsigned char*)libraryInfo->baseAddress) + i);
 				}
 			}
 		}
 
 		return NULL;
 	}
-	bool libraryContainsAddress(char* libraryName,long address)
+	bool libraryContainsAddress(const char* libraryName, long address)
 	{
-		LibraryInfo** libraryInfoPointer = LibraryNameToLibraryInfo->retrieve(libraryName);
+		LibraryInfo* libraryInfo;
 
-		if(libraryInfoPointer)
+		if (LibraryNameToLibraryInfo->retrieve(libraryName, &libraryInfo))
 		{
-			LibraryInfo* libraryInfo = *libraryInfoPointer;
-
 			return (address >= (long)libraryInfo->baseAddress) && (address <= ((long)libraryInfo->baseAddress + libraryInfo->length));
 		}
 
 		return false;
 	}
-	long getAddressOffset(long address,char* libraryName)
+	long getAddressOffset(long address, const char* libraryName)
 	{
-		LibraryInfo** libraryInfoPointer = LibraryNameToLibraryInfo->retrieve(libraryName);
+		LibraryInfo* libraryInfo;
 
-		if(libraryInfoPointer)
+		if (LibraryNameToLibraryInfo->retrieve(libraryName, &libraryInfo))
 		{
-			LibraryInfo* libraryInfo = *libraryInfoPointer;
 			return address - (long)libraryInfo->baseAddress;
 		}
 
 		return 0;
 	}
-	long getAddressWithOffset(long offset,char* libraryName)
+	long getAddressWithOffset(long offset, const char* libraryName)
 	{
-		LibraryInfo** libraryInfoPointer = LibraryNameToLibraryInfo->retrieve(libraryName);
+		LibraryInfo* libraryInfo;
 
-		if(libraryInfoPointer)
+		if (LibraryNameToLibraryInfo->retrieve(libraryName, &libraryInfo))
 		{
-			LibraryInfo* libraryInfo = *libraryInfoPointer;
-
-			if((offset >= 0) && (offset <= (libraryInfo->length)))
+			if ((offset >= 0) && (offset <= (libraryInfo->length)))
 			{
 				return (long)libraryInfo->baseAddress + offset;
 			}
@@ -283,27 +292,26 @@ namespace LibrariesManager
 
 		return 0;
 	}
-	long getLibraryAddress(char* libraryName)
+	long getLibraryAddress(const char* libraryName)
 	{
-		LibraryInfo** libraryInfoPointer = LibraryNameToLibraryInfo->retrieve(libraryName);
+		LibraryInfo* libraryInfo;
 
-		if(libraryInfoPointer)
+		if (LibraryNameToLibraryInfo->retrieve(libraryName, &libraryInfo))
 		{
-			LibraryInfo* libraryInfo = *libraryInfoPointer;
-			return (long) libraryInfo->baseAddress;
+			return (long)libraryInfo->baseAddress;
 		}
 
 		return 0;
 	}
-	LibraryInfo* getLibrary(char* libraryName)
+	LibraryInfo* getLibrary(const char* libraryName)
 	{
-		LibraryInfo** libraryInfoPointer = LibraryNameToLibraryInfo->retrieve(libraryName);
+		LibraryInfo* libraryInfo;
 
-		if(libraryInfoPointer)
+		if (LibraryNameToLibraryInfo->retrieve(libraryName, &libraryInfo))
 		{
-			return *libraryInfoPointer;
+			return libraryInfo;
 		}
 
 		return NULL;
-	}		
+	}
 }
